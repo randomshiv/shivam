@@ -2,3 +2,5 @@ pyTelegramBotAPI
 psutil
 requests
 flask
+requests
+sseclient
