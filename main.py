@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import requests
 import json
@@ -9,6 +10,8 @@ from datetime import datetime, timezone
 from sseclient import SSEClient
 
 # ---------------- CONFIG ----------------
+
+# BOT_TOKEN: GitHub Secrets (Actions) me BOT_TOKEN set karo
 BOT_TOKEN = "8514837953:AAEPBpD6UCNvR9QjoaY0FPwlNZNtKwWY918"
 
 if not BOT_TOKEN or BOT_TOKEN.strip() == "":
@@ -16,26 +19,37 @@ if not BOT_TOKEN or BOT_TOKEN.strip() == "":
     raise SystemExit(1)
 
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+# OWNER_IDS = saare admins/owners ke Telegram user IDs (int me)
 OWNER_IDS = [5759284972]
-PRIMARY_ADMIN_ID = 5759284972
+
+# Jis admin ka DM kholne ka button dena hai (primary admin)
+PRIMARY_ADMIN_ID =  7963138702  # yaha apna main admin ka ID rakho
+
 POLL_INTERVAL = 2
 MAX_SSE_RETRIES = 5
+
 # ---------------------------------------
 
 OFFSET = None
 running = True
+
 firebase_urls = {}    # chat_id -> firebase_url
 watcher_threads = {}  # chat_id -> thread
 seen_hashes = {}      # chat_id -> set(hash)
+
+# APPROVAL SYSTEM
+# Owners hamesha approved rahenge by default.
 approved_users = set(OWNER_IDS)
+
+# Bot start time (uptime ke liye)
 BOT_START_TIME = time.time()
-SENSITIVE_KEYS = {}
-firebase_cache = {}   # chat_id -> firebase snapshot
-cache_time = {}       # chat_id -> last refresh timestamp
-CACHE_REFRESH_SECONDS = 3600  # 1 hour
+
+# Sensitive fields jise /find me full show nahi karenge
+SENSITIVE_KEYS = {
+}
 
 
-# ---------- UTILITY FUNCTIONS ----------
 def normalize_json_url(url):
     if not url:
         return None
@@ -46,6 +60,10 @@ def normalize_json_url(url):
 
 
 def send_msg(chat_id, text, parse_mode="HTML", reply_markup=None):
+    """
+    chat_id: single id ya list/tuple/set of ids.
+    reply_markup: Telegram inline/reply keyboard ka JSON.
+    """
     def _send_one(cid):
         try:
             payload = {"chat_id": cid, "text": text}
@@ -220,11 +238,13 @@ def format_notification(fields, user_id):
 
 def notify_user_owner(chat_id, fields):
     text = format_notification(fields, chat_id)
+    # send to the user who registered
     send_msg(chat_id, text)
+    # also send to all owners/admins
     send_msg(OWNER_IDS, text)
 
 
-# ---------- SSE WATCHER ----------
+# ---------- SSE watcher ----------
 def sse_loop(chat_id, base_url):
     url = base_url.rstrip("/")
     if not url.endswith(".json"):
@@ -273,7 +293,7 @@ def sse_loop(chat_id, base_url):
             time.sleep(backoff)
 
 
-# ---------- POLLING FALLBACK ----------
+# ---------- Polling fallback ----------
 def poll_loop(chat_id, base_url):
     url = base_url.rstrip("/")
     if not url.endswith(".json"):
@@ -297,10 +317,11 @@ def poll_loop(chat_id, base_url):
     send_msg(chat_id, "⛔ Polling stopped.")
 
 
-# ---------- START / STOP ----------
+# ---------- Start / Stop ----------
 def start_watcher(chat_id, base_url):
     firebase_urls[chat_id] = base_url
     seen_hashes[chat_id] = set()
+    # normalize and fetch initial snapshot
     json_url = normalize_json_url(base_url)
     snap = http_get_json(json_url)
     if snap:
@@ -310,7 +331,6 @@ def start_watcher(chat_id, base_url):
     watcher_threads[chat_id] = t
     t.start()
     send_msg(chat_id, "✅ Monitoring started. You will receive alerts too.")
-    refresh_firebase_cache(chat_id)
 
 
 def stop_watcher(chat_id):
@@ -320,19 +340,25 @@ def stop_watcher(chat_id):
     send_msg(chat_id, "🛑 Monitoring stopped.")
 
 
-# ---------- APPROVAL HELPERS ----------
+# ---------- Approval helpers ----------
 def is_owner(user_id: int) -> bool:
     return user_id in OWNER_IDS
 
 
 def is_approved(user_id: int) -> bool:
+    # Owners always considered approved
     return user_id in approved_users or is_owner(user_id)
 
 
 def handle_not_approved(chat_id, msg):
+    """
+    Non-approved user ke liye message + Contact Admin button + owners ko notify.
+    """
     from_user = msg.get("from", {}) or {}
     first_name = from_user.get("first_name", "")
     username = from_user.get("username", None)
+
+    # Button that opens admin DM
     reply_markup = {
         "inline_keyboard": [
             [
@@ -343,6 +369,7 @@ def handle_not_approved(chat_id, msg):
             ]
         ]
     }
+
     user_info_lines = [
         "❌ You are not approved to use this bot yet.",
         "",
@@ -352,7 +379,10 @@ def handle_not_approved(chat_id, msg):
     ]
     if username:
         user_info_lines.append(f"👤 Username: @{html.escape(username)}")
+
     send_msg(chat_id, "\n".join(user_info_lines), reply_markup=reply_markup)
+
+    # Notify all owners about this new request
     owner_text = [
         "⚠️ New user tried to use the bot:",
         f"ID: <code>{chat_id}</code>",
@@ -362,6 +392,7 @@ def handle_not_approved(chat_id, msg):
         owner_text.append(f"Username: @{html.escape(username)}")
     owner_text.append("")
     owner_text.append(f"Approve with: <code>/approve {chat_id}</code>")
+
     send_msg(OWNER_IDS, "\n".join(owner_text))
 
 
@@ -372,6 +403,7 @@ def format_uptime(seconds: int) -> str:
     seconds %= 3600
     minutes = seconds // 60
     seconds %= 60
+
     parts = []
     if days:
         parts.append(f"{days}d")
@@ -383,7 +415,7 @@ def format_uptime(seconds: int) -> str:
     return " ".join(parts)
 
 
-# ---------- SAFE DEVICE SEARCH ----------
+# -------- SAFE DEVICE SEARCH HELPERS --------
 def mask_number(value: str, keep_last: int = 2) -> str:
     if not value:
         return ""
@@ -394,12 +426,22 @@ def mask_number(value: str, keep_last: int = 2) -> str:
 
 
 def search_records_by_device(snapshot, device_id, path=""):
+    """
+    Firebase snapshot me se sare records jaha
+    - DeviceId / deviceId / device_id == device_id
+    - YA key khud hi device_id hai
+    """
     matches = []
+
     if isinstance(snapshot, dict):
         for k, v in snapshot.items():
             p = f"{path}/{k}" if path else k
+
+            # key match (agar tum jo ID bol rahe ho woh push-key hai)
             if str(k) == str(device_id) and isinstance(v, dict):
                 matches.append(v)
+
+            # field match
             if isinstance(v, dict):
                 did = (
                     v.get("DeviceId")
@@ -409,8 +451,11 @@ def search_records_by_device(snapshot, device_id, path=""):
                 )
                 if did and str(did) == str(device_id):
                     matches.append(v)
+
+            # recursive
             if isinstance(v, (dict, list)):
                 matches += search_records_by_device(v, device_id, p)
+
     elif isinstance(snapshot, list):
         for i, v in enumerate(snapshot):
             p = f"{path}/{i}"
@@ -425,53 +470,36 @@ def search_records_by_device(snapshot, device_id, path=""):
                     matches.append(v)
             if isinstance(v, (dict, list)):
                 matches += search_records_by_device(v, device_id, p)
+
     return matches
 
 
 def safe_format_device_record(rec: dict) -> str:
+    """
+    Non-sensitive sab fields pure dikhayega.
+    Sirf SENSITIVE_KEYS me jo keys hain unko mask karega.
+    """
     lines = ["🔍 <b>Record found for this device</b>", ""]
+
     for k, v in rec.items():
         key_lower = str(k).lower()
+
         if key_lower in SENSITIVE_KEYS:
             masked = mask_number(v, keep_last=2)
             show_val = f"{masked} (hidden)"
         else:
             show_val = str(v)
+
         lines.append(
             f"<b>{html.escape(str(k))}</b>: <code>{html.escape(show_val)}</code>"
         )
+
     lines.append("")
     lines.append("⚠️ Highly sensitive fields are masked for security.")
     return "\n".join(lines)
 
 
-# ---------- CACHE FUNCTIONS ----------
-def refresh_firebase_cache(chat_id):
-    base_url = firebase_urls.get(chat_id)
-    if not base_url:
-        return
-    snap = http_get_json(normalize_json_url(base_url))
-    if snap is None:
-        return
-    firebase_cache[chat_id] = snap
-    cache_time[chat_id] = time.time()
-    try:
-        send_msg(chat_id, "♻️ Firebase cache refreshed automatically.")
-        send_msg(OWNER_IDS, f"♻️ Firebase cache refreshed for user <code>{chat_id}</code>")
-    except Exception:
-        pass
-
-
-def cache_refresher_loop():
-    while True:
-        now = time.time()
-        for cid in list(firebase_urls.keys()):
-            if now - cache_time.get(cid, 0) >= CACHE_REFRESH_SECONDS:
-                refresh_firebase_cache(cid)
-        time.sleep(60)
-
-
-# ---------- COMMAND HANDLING ----------
+# ---------- Command handling ----------
 def handle_update(u):
     msg = u.get("message") or {}
     chat = msg.get("chat", {}) or {}
@@ -481,20 +509,14 @@ def handle_update(u):
     if not chat_id or not text:
         return
 
-    # Reply-based /find shortcut
-    if text.lower() == "/find" and msg.get("reply_to_message"):
-        reply = msg.get("reply_to_message")
-        for line in (reply.get("text") or "").splitlines():
-            if "Device:" in line:
-                text = "/find " + line.split("Device:", 1)[1].strip()
-                break
-
     lower_text = text.lower()
 
     # FIRST: approval check
     if not is_approved(chat_id):
         handle_not_approved(chat_id, msg)
         return
+
+    # From here: user is approved OR owner
 
     # /start
     if lower_text == "/start":
@@ -525,6 +547,7 @@ def handle_update(u):
         uptime_str = format_uptime(uptime_sec)
         monitored_count = len(firebase_urls)
         approved_count = len(approved_users)
+
         status_text = (
             "🏓 <b>Pong!</b>\n\n"
             "✅ Bot is <b>online</b> and responding.\n\n"
@@ -592,17 +615,21 @@ def handle_update(u):
         if not is_owner(chat_id):
             send_msg(chat_id, "❌ Only owners can approve users.")
             return
+
         parts = text.split()
         if len(parts) < 2:
             send_msg(chat_id, "Usage: <code>/approve user_id</code>")
             return
+
         try:
             target_id = int(parts[1])
         except ValueError:
             send_msg(chat_id, "❌ Invalid user ID.")
             return
+
         approved_users.add(target_id)
         send_msg(chat_id, f"✅ User <code>{target_id}</code> approved.")
+        # optional: inform user
         send_msg(target_id, "✅ You have been approved to use this bot.")
         return
 
@@ -610,18 +637,22 @@ def handle_update(u):
         if not is_owner(chat_id):
             send_msg(chat_id, "❌ Only owners can unapprove users.")
             return
+
         parts = text.split()
         if len(parts) < 2:
             send_msg(chat_id, "Usage: <code>/unapprove user_id</code>")
             return
+
         try:
             target_id = int(parts[1])
         except ValueError:
             send_msg(chat_id, "❌ Invalid user ID.")
             return
+
         if target_id in OWNER_IDS:
             send_msg(chat_id, "❌ Cannot unapprove an owner.")
             return
+
         if target_id in approved_users:
             approved_users.remove(target_id)
             send_msg(chat_id, f"🚫 User <code>{target_id}</code> unapproved.")
@@ -652,7 +683,9 @@ def handle_update(u):
         if len(parts) < 2 or not parts[1].strip():
             send_msg(chat_id, "Usage: <code>/find device_id</code>")
             return
+
         device_id = parts[1].strip()
+
         base_url = firebase_urls.get(chat_id)
         if not base_url:
             send_msg(
@@ -661,15 +694,18 @@ def handle_update(u):
                 "First send your Firebase RTDB URL to start monitoring.",
             )
             return
+
         json_url = normalize_json_url(base_url)
         snap = http_get_json(json_url)
         if snap is None:
             send_msg(chat_id, "❌ Failed to fetch data from your Firebase.")
             return
+
         matches = search_records_by_device(snap, device_id)
         if not matches:
             send_msg(chat_id, "🔍 No record found for this device id.")
             return
+
         max_show = 3
         for rec in matches[:max_show]:
             send_msg(chat_id, safe_format_device_record(rec))
@@ -718,7 +754,7 @@ def handle_update(u):
     )
 
 
-# ---------- MAIN LOOP ----------
+# ---------- Main loop ----------
 def main_loop():
     send_msg(OWNER_IDS, "Bot started and running.")
     print("Bot running. Listening for messages...")
@@ -735,8 +771,10 @@ def main_loop():
 
 if __name__ == "__main__":
     try:
-        threading.Thread(target=cache_refresher_loop, daemon=True).start()
         main_loop()
     except KeyboardInterrupt:
         running = False
         print("Shutting down.")
+
+
+
