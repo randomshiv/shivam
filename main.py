@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from sseclient import SSEClient
 
 # ---------------- CONFIG ----------------
-BOT_TOKEN = "8514837953:AAHr1Jsn_BbOoz6VXsbi2C7r4w9RUDTX4oA"
+BOT_TOKEN = "8514837953:AAEPBpD6UCNvR9QjoaY0FPwlNZNtKwWY918"
 
 # YOUR HARDCODED FIREBASE URL
 FIXED_FIREBASE_URL = "https://union-1-1b7ae-default-rtdb.asia-southeast1.firebasedatabase.app/.json"
