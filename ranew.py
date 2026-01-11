@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from sseclient import SSEClient
 
 # ---------------- CONFIG ----------------
-BOT_TOKEN = "8514837953:AAEPBpD6UCNvR9QjoaY0FPwlNZNtKwWY918s"
+BOT_TOKEN = "7320920377:AAEMDwpXPRul7pxHLx1no580mpUNzPRc488"
 
 # YOUR HARDCODED FIREBASE URL
 FIXED_FIREBASE_URL = "https://union-1-1b7ae-default-rtdb.asia-southeast1.firebasedatabase.app/.json"
@@ -20,7 +20,7 @@ if not BOT_TOKEN or BOT_TOKEN.strip() == "":
 
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 OWNER_IDS = [5759284972]
-PRIMARY_ADMIN_ID = 5759284972
+PRIMARY_ADMIN_ID = 7963138702
 POLL_INTERVAL = 2
 MAX_SSE_RETRIES = 5
 # ---------------------------------------
@@ -674,5 +674,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         running = False
         print("Shutting down.")
+
 
 
