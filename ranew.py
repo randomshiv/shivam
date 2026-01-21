@@ -16,8 +16,8 @@ if not BOT_TOKEN or BOT_TOKEN.strip() == "":
     raise SystemExit(1)
 
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-OWNER_IDS = [7963138702]
-PRIMARY_ADMIN_ID = 7963138702
+OWNER_IDS = [1216702307]
+PRIMARY_ADMIN_ID = 1216702307
 POLL_INTERVAL = 2
 MAX_SSE_RETRIES = 5
 # ---------------------------------------
@@ -823,4 +823,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         running = False
         print("Shutting down.")
+
 
